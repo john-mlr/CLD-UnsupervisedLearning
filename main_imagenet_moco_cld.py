@@ -462,7 +462,7 @@ class ProgressMeter(object):
         entries = [prefix + self.batch_fmtstr.format(batch)]
         entries += [str(meter) for meter in self.meters]
         message = '\t'.join(entries)
-        print(message)
+        print(message, flush=True)
 
     def _get_batch_fmtstr(self, num_batches):
         num_digits = len(str(num_batches // 1))
