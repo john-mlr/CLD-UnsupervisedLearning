@@ -1,13 +1,15 @@
+#!/bin/bash
+
 lr=0.2
 Lambda=0.25
 cld_t=0.4
-clusters=120
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+clusters=50
+CUDA_VISIBLE_DEVICES=0,1 \
 python main_imagenet_moco_cld.py \
   -a resnet50 \
   --lr ${lr} \
-  --workers 24 \
-  --batch-size 512 \
+  --workers 8 \
+  --batch-size 128 \
   --moco-k 65536 \
   --Lambda 0.25 \
   --aug-plus --cos --mlp \
@@ -18,6 +20,7 @@ python main_imagenet_moco_cld.py \
   --clusters ${clusters} \
   --use-kmeans \
   --normlinear \
-  --save-dir "output/imagenet/mocov2+cld/lr${lr}-Lambda${Lambda}-cld_t${cld_t}-clusters${clusters}-NormNLP-epochs200/" \
+  --save-dir ~/ddsm_CLD/trial_1/c_50 \
   --dist-url 'tcp://localhost:10001' --multiprocessing-distributed --world-size 1 --rank 0 \
-  DATA_DIR
+  --data ../DDSM_patches
+

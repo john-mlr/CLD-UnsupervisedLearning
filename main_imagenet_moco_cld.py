@@ -30,7 +30,8 @@ import json
 
 import torchvision.models as models
 from spectral_clustering import spectral_clustering, pairwise_cosine_similarity, KMeans
-
+from mammo_transforms import ToTensor3D
+from skimage import io, img_as_float32
 try:
     # noinspection PyUnresolvedReferences
     from apex import amp
@@ -42,7 +43,7 @@ model_names = sorted(name for name in models.__dict__
     and callable(models.__dict__[name]))
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
-parser.add_argument('data', metavar='DIR',
+parser.add_argument('--data', metavar='DIR',
                     help='path to dataset')
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
                     choices=model_names,
@@ -51,7 +52,7 @@ parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
                         ' (default: resnet50)')
 parser.add_argument('-j', '--workers', default=32, type=int, metavar='N',
                     help='number of data loading workers (default: 32)')
-parser.add_argument('--epochs', default=200, type=int, metavar='N',
+parser.add_argument('--epochs', default=100, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
@@ -130,6 +131,10 @@ parser.add_argument('--num-iters', default=10, type=int,
                     help='num of iters for clustering')
 parser.add_argument('--use-kmeans', action='store_true', 
                     help='Whether use two randomly processed images')
+
+def sk_loader(path): # try using skimage
+    image = io.imread(path)
+    return img_as_float32(image)
 
 def main():
     global args
@@ -273,36 +278,37 @@ def main_worker(gpu, ngpus_per_node, args):
     cudnn.benchmark = True
 
     # Data loading code
-    traindir = os.path.join(args.data, 'train')
+    traindir = os.path.join(args.data, 'bps-train')
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
     if args.aug_plus:
         # MoCo v2's aug: similar to SimCLR https://arxiv.org/abs/2002.05709
         augmentation = [
+            ToTensor3D(),
             transforms.RandomResizedCrop(224, scale=(0.2, 1.)),
             transforms.RandomApply([
                 transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)  # not strengthened
             ], p=0.8),
             transforms.RandomGrayscale(p=0.2),
-            transforms.RandomApply([loader.GaussianBlur([.1, 2.])], p=0.5),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
+            transforms.RandomApply([transforms.GaussianBlur(kernel_size=23,
+                                                            sigma=(0.1, 2.0))], p=0.5),
             normalize
         ]
     else:
         # MoCo v1's aug: the same as InstDisc https://arxiv.org/abs/1805.01978
         augmentation = [
+            ToTensor3D(),
             transforms.RandomResizedCrop(224, scale=(0.2, 1.)),
             transforms.RandomGrayscale(p=0.2),
             transforms.ColorJitter(0.4, 0.4, 0.4, 0.4),
             transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
             normalize
         ]
 
     train_dataset = datasets.ImageFolder(
         traindir,
-        loader.ThreeCropsTransform(transforms.Compose(augmentation)))
+        loader.ThreeCropsTransform(transforms.Compose(augmentation)),
+        loader=sk_loader)
 
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
@@ -360,12 +366,12 @@ def grouping(features_groupDis1, features_groupDis2, T, args):
 def train(train_loader, model, criterion, optimizer, epoch, args):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
-    losses = AverageMeter('Loss', ':.4e')
+    losses = AverageMeter('Loss', ':.4f')
     top1 = AverageMeter('Acc@1', ':6.2f')
-    top5 = AverageMeter('Acc@5', ':6.2f')
+    top2 = AverageMeter('Acc@2', ':6.2f')
     progress = ProgressMeter(
         len(train_loader),
-        [batch_time, data_time, losses, top1, top5],
+        [batch_time, data_time, losses, top1, top2],
         prefix="Epoch: [{}]".format(epoch))
 
     # switch to train mode
@@ -388,12 +394,12 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         loss = criterion(logits1, labels1)/2 + criterion(logits2, labels2)/2
         loss += args.Lambda*grouping(eq1, eq2, args.cld_t, args)
 
-        # acc1/acc5 are (K+1)-way contrast classifier accuracy
+        # acc1/acc2 are (K+1)-way contrast classifier accuracy
         # measure accuracy and record loss
-        acc1, acc5 = accuracy(logits1, labels1, topk=(1, 5))
+        acc1, acc2 = accuracy(logits1, labels1, topk=(1, 2))
         losses.update(loss.item(), images[0].size(0))
         top1.update(acc1[0], images[0].size(0))
-        top5.update(acc5[0], images[0].size(0))
+        top2.update(acc2[0], images[0].size(0))
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -489,7 +495,7 @@ def accuracy(output, target, topk=(1,)):
 
         res = []
         for k in topk:
-            correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
+            correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
             res.append(correct_k.mul_(100.0 / batch_size))
         return res
 

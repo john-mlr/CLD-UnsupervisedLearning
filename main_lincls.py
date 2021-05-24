@@ -23,12 +23,19 @@ import torchvision.models as models
 
 import datetime
 
+from mammo_transforms import ToTensor3D
+from skimage import io, img_as_float32
+
+def sk_loader(path): # try using skimage
+    image = io.imread(path)
+    return img_as_float32(image)
+
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(models.__dict__[name]))
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
-parser.add_argument('data', metavar='DIR',
+parser.add_argument('--data', metavar='DIR',
                     help='path to dataset')
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
                     choices=model_names,
@@ -246,8 +253,8 @@ def main_worker(gpu, ngpus_per_node, args):
     cudnn.benchmark = True
 
     # Data loading code
-    traindir = os.path.join(args.data, 'train')
-    valdir = os.path.join(args.data, 'val')
+    traindir = os.path.join(args.data, 'bps-train')
+    valdir = os.path.join(args.data, 'cbis-test')
     print("valdir is: {}".format(valdir))
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
@@ -255,11 +262,12 @@ def main_worker(gpu, ngpus_per_node, args):
     train_dataset = datasets.ImageFolder(
         traindir,
         transforms.Compose([
+            ToTensor3D(),
             transforms.RandomResizedCrop(224),
             transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
             normalize,
-        ]))
+        ]),
+        loader=sk_loader)
 
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
@@ -272,11 +280,12 @@ def main_worker(gpu, ngpus_per_node, args):
 
     val_loader = torch.utils.data.DataLoader(
         datasets.ImageFolder(valdir, transforms.Compose([
+            ToTensor3D(),
             transforms.Resize(256),
             transforms.CenterCrop(224),
-            transforms.ToTensor(),
             normalize,
-        ])),
+        ]),
+        loader=sk_loader),
         batch_size=args.batch_size, shuffle=False,
         num_workers=args.workers, pin_memory=True)
 
@@ -318,12 +327,12 @@ def main_worker(gpu, ngpus_per_node, args):
 def train(train_loader, model, criterion, optimizer, epoch, args):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
-    losses = AverageMeter('Loss', ':.4e')
+    losses = AverageMeter('Loss', ':.4f')
     top1 = AverageMeter('Acc@1', ':6.2f')
-    top5 = AverageMeter('Acc@5', ':6.2f')
+    top2 = AverageMeter('Acc@2', ':6.2f')
     progress = ProgressMeter(
         len(train_loader),
-        [batch_time, data_time, losses, top1, top5],
+        [batch_time, data_time, losses, top1, top2],
         prefix="Epoch: [{}]".format(epoch))
 
     """
@@ -349,10 +358,10 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         loss = criterion(output, target)
 
         # measure accuracy and record loss
-        acc1, acc5 = accuracy(output, target, topk=(1, 5))
+        acc1, acc2 = accuracy(output, target, topk=(1, 2))
         losses.update(loss.item(), images.size(0))
         top1.update(acc1[0], images.size(0))
-        top5.update(acc5[0], images.size(0))
+        top2.update(acc2[0], images.size(0))
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -370,12 +379,12 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
 def validate(test_loader, model, criterion, args, train_loader):
     train_labels = torch.tensor(train_loader.dataset.targets).cuda(args.gpu)
     batch_time = AverageMeter('Time', ':6.3f')
-    losses = AverageMeter('Loss', ':.4e')
+    losses = AverageMeter('Loss', ':.4f')
     top1 = AverageMeter('Acc@1', ':6.2f')
     many = AverageMeter('Many', ':6.2f')
     med = AverageMeter('Med', ':6.2f')
     few = AverageMeter('Few', ':6.2f')
-    top5 = AverageMeter('Acc@5', ':6.2f')
+    top2 = AverageMeter('Acc@2', ':6.2f')
     labels, label_counts = train_labels.unique(return_counts=True)
     assert torch.all(labels == torch.arange(labels.size(0), device=labels.device))
 
@@ -385,7 +394,7 @@ def validate(test_loader, model, criterion, args, train_loader):
 
     progress = ProgressMeter(
         len(test_loader),
-        [batch_time, losses, top1, top5],
+        [batch_time, losses, top1, top2],
         prefix='Test: ')
 
     # switch to evaluate mode
@@ -403,10 +412,10 @@ def validate(test_loader, model, criterion, args, train_loader):
             loss = criterion(output, target)
 
             # measure accuracy and record loss
-            acc1, acc5 = accuracy(output, target, topk=(1, 5))
+            acc1, acc2 = accuracy(output, target, topk=(1, 2))
             losses.update(loss.item(), images.size(0))
             top1.update(acc1[0], images.size(0))
-            top5.update(acc5[0], images.size(0))
+            top2.update(acc2[0], images.size(0))
 
             # measure elapsed time
             batch_time.update(time.time() - end)
@@ -430,8 +439,8 @@ def validate(test_loader, model, criterion, args, train_loader):
                 progress.display(i, args)
 
         # TODO: this should also be done with the ProgressMeter
-        print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f} Many {many.avg:.3f} Medium {medium.avg:.3f} Few {few.avg:.3f}'
-              .format(top1=top1, top5=top5, many=many, medium=med, few=few))
+        print(' * Acc@1 {top1.avg:.3f} Acc@2 {top2.avg:.3f} Many {many.avg:.3f} Medium {medium.avg:.3f} Few {few.avg:.3f}'
+              .format(top1=top1, top2=top2, many=many, medium=med, few=few))
 
     return top1.avg
 
@@ -535,7 +544,7 @@ def accuracy(output, target, topk=(1,)):
 
         res = []
         for k in topk:
-            correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
+            correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
             res.append(correct_k.mul_(100.0 / batch_size))
         return res
 
